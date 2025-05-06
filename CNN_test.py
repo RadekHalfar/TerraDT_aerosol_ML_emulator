@@ -145,13 +145,24 @@ def train_model(nc_file_path, epochs=3, batch_size=4, lr=1e-3, device='cuda' if 
 
 
     # Plot learning curves
-    plt.plot(train_losses, label='Train')
-    plt.plot(val_losses, label='Validation')
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE Loss")
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    # Plot train loss on left y-axis
+    ax1.plot(train_losses, color='blue', label='Train Loss')
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Train Loss (MSE)", color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+    ax1.grid(True)
+
+    # Create a second y-axis sharing the same x-axis
+    ax2 = ax1.twinx()
+    ax2.plot(val_losses, color='red', label='Validation Loss')
+    ax2.set_ylabel("Validation Loss (MSE)", color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
+
+    # Title and legend
     plt.title("Training Curve")
-    plt.legend()
-    plt.grid(True)
+    fig.tight_layout()
     plt.show()
 
     # Save model
