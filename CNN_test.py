@@ -4,14 +4,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-
+import matplotlib.pyplot as plt
 
 # --- Dataset ---
 class KappaDataset(Dataset):
-    def __init__(self, nc_path):
+    def __init__(self, nc_path, indices=None):
         self.data = nc.Dataset(nc_path, 'r')
-        #self.timesteps = self.data.variables['time'].shape[0]
-        self.timesteps = len(self.data.dimensions['time'])
+        total_timesteps = len(self.data.dimensions['time'])
+
+        self.indices = indices if indices is not None else list(range(total_timesteps))
 
         self.inputs_3d = ['emi_SS', 'emi_OC', 'emi_BC', 'emi_DU']
         self.inputs_4d = [
@@ -25,36 +26,31 @@ class KappaDataset(Dataset):
         self.lon = self.data.dimensions['lon'].size
 
     def __len__(self):
-        return self.timesteps
+        return len(self.indices)
 
     def __getitem__(self, idx):
+        t = self.indices[idx]
         inputs = []
 
-        # 3D variables - broadcast over lev
         for var in self.inputs_3d:
-            arr = self.data.variables[var][idx]  # (lat, lon)
-            arr = np.nan_to_num(arr)
-            arr = np.tile(arr[None, :, :], (self.lev, 1, 1))  # (lev, lat, lon)
+            arr = np.nan_to_num(self.data.variables[var][t])
+            arr = np.tile(arr[None, :, :], (self.lev, 1, 1))
             inputs.append(arr)
 
-        # 4D variables
         for var in self.inputs_4d:
-            arr = self.data.variables[var][idx]  # (lev, lat, lon)
-            arr = np.nan_to_num(arr)
+            arr = np.nan_to_num(self.data.variables[var][t])
             inputs.append(arr)
 
-        x = np.stack(inputs, axis=0)  # (channels, lev, lat, lon)
+        x = np.stack(inputs, axis=0)
 
-        # Targets
-        targets = []
-        for var in self.target_vars:
-            y = self.data.variables[var][idx]  # (lev, lat, lon)
-            y = np.nan_to_num(y)
-            targets.append(y)
-
-        y = np.stack(targets, axis=0)  # (2, lev, lat, lon)
+        targets = [
+            np.nan_to_num(self.data.variables[var][t])
+            for var in self.target_vars
+        ]
+        y = np.stack(targets, axis=0)
 
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+
 
 
 # --- Model ---
@@ -80,34 +76,88 @@ class KappaPredictorCNN(nn.Module):
 
 
 # --- Training ---
-def train_model(nc_file_path, epochs=2, batch_size=4, lr=1e-3, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    dataset = KappaDataset(nc_file_path)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+def train_model(nc_file_path, epochs=3, batch_size=4, lr=1e-3, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    # Split indices
+    full_dataset = nc.Dataset(nc_file_path)
+    total_timesteps = len(full_dataset.dimensions['time'])
+    full_dataset.close()
 
-    #model = KappaPredictorCNN(in_channels=13).to(device)
+    indices = np.arange(total_timesteps)
+    np.random.seed(42)
+    np.random.shuffle(indices)
+
+    train_split = int(0.8 * total_timesteps)
+    val_split = int(0.9 * total_timesteps)
+
+    train_idx = indices[:train_split]
+    val_idx = indices[train_split:val_split]
+    test_idx = indices[val_split:]
+
+    train_dataset = KappaDataset(nc_file_path, indices=train_idx)
+    val_dataset = KappaDataset(nc_file_path, indices=val_idx)
+    test_dataset = KappaDataset(nc_file_path, indices=test_idx)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
     model = KappaPredictorCNN(in_channels=12).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
+    train_losses, val_losses = [], []
+
     for epoch in range(epochs):
         model.train()
-        running_loss = 0.0
-        for x_batch, y_batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
+        train_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]", leave=False)
+
+        for x_batch, y_batch in pbar:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
 
             optimizer.zero_grad()
-            outputs = model(x_batch)
-            loss = loss_fn(outputs, y_batch)
+            preds = model(x_batch)
+            loss = loss_fn(preds, y_batch)
             loss.backward()
             optimizer.step()
+            train_loss += loss.item()
+            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
-            running_loss += loss.item()
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
 
-        print(f"Epoch {epoch+1}, Loss: {running_loss / len(dataloader):.4f}")
+        # Validation
+        model.eval()
+        val_loss = 0
+        pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Validation]", leave=False)
+        with torch.no_grad():
+            for x_val, y_val in pbar_val:
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                preds = model(x_val)
+                loss = loss_fn(preds, y_val)
+                val_loss += loss.item()
+                pbar_val.set_postfix({"ValLoss": f"{loss.item():.4f}"})
 
-    # Optional: Save model
+
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+
+        print(f"✅ Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
+
+
+    # Plot learning curves
+    plt.plot(train_losses, label='Train')
+    plt.plot(val_losses, label='Validation')
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.title("Training Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Save model
     torch.save(model.state_dict(), "kappa_predictor_cnn.pth")
-    print("✅ Training complete. Model saved to 'kappa_predictor_cnn.pth'.")
+    print("✅ Training complete. Model saved.")
+
 
 if __name__ == '__main__':
     train_model(r'C:\Users\radek\Documents\IT4I_projects\TerraDT\aerosol_ML_emulator\hamlite_sample_data_filtered.nc')
