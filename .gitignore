@@ -1,4 +1,5 @@
 venv/
+results/
 hamlite_sample_data.nc
 hamlite_sample_data_filtered.nc
 kappa_predictor_cnn.pth

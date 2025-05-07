@@ -5,6 +5,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import os
+from datetime import datetime
 
 # --- Dataset ---
 class KappaDataset(Dataset):
@@ -52,7 +54,6 @@ class KappaDataset(Dataset):
         return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
 
-
 # --- Model ---
 class KappaPredictorCNN(nn.Module):
     def __init__(self, in_channels):
@@ -75,8 +76,16 @@ class KappaPredictorCNN(nn.Module):
         return self.decoder(self.encoder(x))
 
 
+def load_checkpoint(checkpoint_path, model, optimizer):
+    checkpoint = torch.load(checkpoint_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    start_epoch = checkpoint.get('epoch', 0)
+    print(f"🔄 Loaded checkpoint from {checkpoint_path}, starting at epoch {start_epoch}")
+    return model, optimizer, start_epoch
+
 # --- Training ---
-def train_model(nc_file_path, epochs=3, batch_size=4, lr=1e-3, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def train_model(nc_file_path, resume_from=None, epochs=25, batch_size=4, lr=1e-3, device='cuda' if torch.cuda.is_available() else 'cpu'):
     # Split indices
     full_dataset = nc.Dataset(nc_file_path)
     total_timesteps = len(full_dataset.dimensions['time'])
@@ -104,9 +113,30 @@ def train_model(nc_file_path, epochs=3, batch_size=4, lr=1e-3, device='cuda' if 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
-    train_losses, val_losses = [], []
+    if resume_from:
+        results_dir = os.path.dirname(resume_from)
+        print(f"📂 Resuming training, saving outputs to existing folder: {results_dir}")
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        results_dir = os.path.join("results", f"res_{timestamp}")
+        os.makedirs(results_dir, exist_ok=True)
 
-    for epoch in range(epochs):
+    log_path = os.path.join(results_dir, "val_loss_log.txt")
+    best_model_path = os.path.join(results_dir, "best_model_checkpoint.pth")
+    latest_model_path = os.path.join(results_dir, "latest_model_checkpoint.pth")
+    training_plot_path = os.path.join(results_dir, "training_curve.png")
+
+
+    start_epoch = 0  # Default if not resuming
+
+    if resume_from and os.path.exists(resume_from):
+        model, optimizer, start_epoch = load_checkpoint(resume_from, model, optimizer)
+
+
+    train_losses, val_losses = [], []
+    best_val_loss = float('inf')
+
+    for epoch in range(start_epoch, epochs):
         model.train()
         train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]", leave=False)
@@ -137,38 +167,58 @@ def train_model(nc_file_path, epochs=3, batch_size=4, lr=1e-3, device='cuda' if 
                 val_loss += loss.item()
                 pbar_val.set_postfix({"ValLoss": f"{loss.item():.4f}"})
 
-
         val_loss /= len(val_loader)
         val_losses.append(val_loss)
 
         print(f"✅ Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
 
+        # Save latest model each epoch
+        latest_checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': val_loss,
+            'train_loss': train_loss,
+        }
+        torch.save(latest_checkpoint, latest_model_path)
 
-    # Plot learning curves
+        # Save best model if improved
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(latest_checkpoint, best_model_path)
+
+            with open(log_path, "a") as f:
+                f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
+
+            print(f"📦 Best model updated at epoch {epoch+1}, saved to {best_model_path}")
+        else:
+            with open(log_path, "a") as f:
+                f.write(f"Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
+
+    
+    # Plot and save learning curves
     fig, ax1 = plt.subplots(figsize=(8, 5))
 
-    # Plot train loss on left y-axis
     ax1.plot(train_losses, color='blue', label='Train Loss')
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Train Loss (MSE)", color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
     ax1.grid(True)
 
-    # Create a second y-axis sharing the same x-axis
     ax2 = ax1.twinx()
     ax2.plot(val_losses, color='red', label='Validation Loss')
     ax2.set_ylabel("Validation Loss (MSE)", color='red')
     ax2.tick_params(axis='y', labelcolor='red')
 
-    # Title and legend
-    plt.title("Training Curve")
     fig.tight_layout()
+
+    plt.savefig(training_plot_path)
     plt.show()
 
-    # Save model
-    torch.save(model.state_dict(), "kappa_predictor_cnn.pth")
-    print("✅ Training complete. Model saved.")
+    print(f"📊 Training curve saved to {training_plot_path}")
+    print("✅ Training complete.")
 
 
 if __name__ == '__main__':
     train_model(r'C:\Users\radek\Documents\IT4I_projects\TerraDT\aerosol_ML_emulator\hamlite_sample_data_filtered.nc')
+    
