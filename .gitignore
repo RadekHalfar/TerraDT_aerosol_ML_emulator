@@ -2,5 +2,7 @@ venv/
 results/
 bckp_files/
 __pycache__/
+venv_terraDT/
+mlruns/
 hamlite_sample_data.nc
 hamlite_sample_data_filtered.nc
