@@ -160,16 +160,16 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             'val_loss': val_loss,
             'train_loss': train_loss,
         }
-        torch.save(latest_checkpoint, latest_model_path)
         
         # Log model checkpoint as artifact
-        mlflow.pytorch.log_model(model, f"models/epoch_{epoch+1}")
+        mlflow.pytorch.log_model(model, "latest_model")
+        #mlflow.log_artifact(latest_model_path, "latest_model")
 
         # Save best model if improved
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(latest_checkpoint, best_model_path)
-            mlflow.log_artifact(best_model_path, "best_model")
+            mlflow.pytorch.log_model(model, "best_model")
+            #mlflow.log_artifact(best_model_path, "best_model")
             
             with open(log_path, "a") as f:
                 f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")

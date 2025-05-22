@@ -3,6 +3,7 @@ from train import train_model
 from model_CNN_test import KappaPredictorCNN
 from model_UNet_test import UNet3D
 import torch.nn as nn
+from utils import visualize_mlflow_prediction
 
 if __name__ == '__main__':
 
@@ -18,9 +19,18 @@ if __name__ == '__main__':
         n_classes=2,    # kappa_SU and kappa_CA
         bilinear=True   # Use bilinear upsampling (smoother but potentially less sharp)
     ).to(device)
-    
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     
     # Run the training
-    train_model('hamlite_sample_data_filtered.nc', epochs=1, plot=True, model=model, optimizer=optimizer, loss_fn=loss_fn, device = device, lr = lr, batch_size = batch_size, experiment_name="KappaPredictor")
+    #train_model('hamlite_sample_data_filtered.nc', epochs=1, plot=True, model=model, optimizer=optimizer, loss_fn=loss_fn, device = device, lr = lr, batch_size = batch_size, experiment_name="KappaPredictor")
+    
+    visualize_mlflow_prediction(
+        run_id="80bf738e6ce2401bb57c586df02bf122",
+        nc_path="hamlite_sample_data_filtered.nc",
+        lev_indices=[0, 10],  # levels to visualize
+        model_name="best_model"
+    )
+    
+
