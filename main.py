@@ -1,5 +1,6 @@
 import torch
-from train import train_model
+from train_time_approach import train_model
+#from train import train_model
 from model_CNN_test import KappaPredictorCNN
 from model_UNet_test import UNet3D
 import torch.nn as nn
@@ -24,13 +25,15 @@ if __name__ == '__main__':
     loss_fn = nn.MSELoss()
     
     # Run the training
-    #train_model('hamlite_sample_data_filtered.nc', epochs=1, plot=True, model=model, optimizer=optimizer, loss_fn=loss_fn, device = device, lr = lr, batch_size = batch_size, experiment_name="KappaPredictor")
+    train_model('hamlite_sample_data_filtered.nc', epochs=25, plot=True, model=model, 
+        optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 3,
+        lr = lr, batch_size = batch_size, experiment_name="KappaPredictor")
     
-    visualize_mlflow_prediction(
-        run_id="80bf738e6ce2401bb57c586df02bf122",
-        nc_path="hamlite_sample_data_filtered.nc",
-        lev_indices=[0, 10],  # levels to visualize
-        model_name="best_model"
-    )
+    #visualize_mlflow_prediction(
+    #    #run_id="0b6d8924840d4773bb0e32330acf1327",
+    #    run_id="111afb2fc5ba4bc791285532389e6ede",
+    #    nc_path="hamlite_sample_data_filtered.nc",
+    #    lev_indices=[0, 10],  # levels to visualize
+    #    model_name="fold0/best_model"
+    #)
     
-
