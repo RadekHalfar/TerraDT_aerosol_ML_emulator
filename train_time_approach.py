@@ -16,6 +16,9 @@ import psutil
 import GPUtil
 from sklearn.model_selection import TimeSeriesSplit
 from copy import deepcopy
+from SequenceKappaDataset import SequenceKappaDataset
+from torch.amp import autocast, GradScaler
+import platform
 
 def log_system_metrics(step):
     """Log system metrics"""
@@ -46,11 +49,90 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                device='cuda' if torch.cuda.is_available() else 'cpu',
                plot=True, experiment_name="Default",
                n_splits: int = 5, gap: int = 0,
-               show_fold_plot: bool = False):
+               show_fold_plot: bool = False,
+               seq_len: int = 1):
     
     # Set up MLflow
-    mlflow.set_experiment(experiment_name)
-    mlflow.start_run()
+    # Ensure MLflow writes to a path valid in WSL (POSIX). This avoids paths like '/C:/...'
+    # that can appear when Windows-style paths are auto-detected and prefixed with '/'.
+    tracking_dir = Path("mlruns").resolve()
+    # Cross-platform: build a proper file URI (file:///...) that works on Windows and WSL
+    desired_tracking_uri = tracking_dir.as_uri()
+    # Strong override in case environment defaults are set
+    os.environ["MLFLOW_TRACKING_URI"] = desired_tracking_uri
+    mlflow.set_tracking_uri(desired_tracking_uri)
+
+    # Derive environment-specific experiment name to avoid artifact path clashes
+    def _is_wsl() -> bool:
+        try:
+            with open('/proc/version', 'r') as f:
+                v = f.read().lower()
+                return 'microsoft' in v or 'wsl' in v
+        except Exception:
+            return False
+
+    if _is_wsl():
+        env_suffix = 'wsl'
+    elif platform.system().lower() == 'windows':
+        env_suffix = 'win'
+    else:
+        env_suffix = 'posix'
+
+    experiment_actual_name = f"{experiment_name}_{env_suffix}"
+
+    # Resolve or create experiment with the artifact location under this environment
+    exp = mlflow.get_experiment_by_name(experiment_actual_name)
+    exp_id = None
+    if exp is None:
+        # New experiment pointing to the desired POSIX artifact location
+        exp_id = mlflow.create_experiment(
+            experiment_actual_name,
+            artifact_location=desired_tracking_uri
+        )
+    else:
+        # If existing experiment has a different artifact location, recreate with this env name
+        current_loc = (exp.artifact_location or "")
+        if not current_loc.startswith(desired_tracking_uri):
+            exp_id = mlflow.create_experiment(
+                experiment_actual_name,
+                artifact_location=desired_tracking_uri
+            )
+        else:
+            exp_id = exp.experiment_id
+
+    # End any active run (from previous errors) before starting a new one
+    try:
+        if mlflow.active_run() is not None:
+            mlflow.end_run()
+    except Exception:
+        pass
+
+    # Start run explicitly under the selected experiment id
+    mlflow.start_run(experiment_id=exp_id)
+    # Debug: confirm URIs used
+    try:
+        print(f"MLflow tracking URI: {mlflow.get_tracking_uri()}")
+        print(f"MLflow artifact URI: {mlflow.get_artifact_uri()}")
+        exp_meta = mlflow.get_experiment(exp_id)
+        print(f"MLflow experiment: id={exp_meta.experiment_id}, name={exp_meta.name}, artifact_location={exp_meta.artifact_location}")
+    except Exception:
+        pass
+
+    # Performance / stability settings for CUDA
+    try:
+        torch.set_float32_matmul_precision('high')
+    except Exception:
+        pass
+    if device == 'cuda':
+        try:
+            torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            pass
     
     # Log parameters
     mlflow.log_params({
@@ -58,7 +140,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         'learning_rate': lr,
         'epochs': epochs,
         'device': device,
-        'model_type': model.__class__.__name__
+        'model_type': model.__class__.__name__,
+        'seq_len': int(seq_len),
     })
     
     # Log model architecture
@@ -103,11 +186,16 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             model.load_state_dict(initial_state)
 
         # Datasets and loaders (no shuffle to preserve time order)
-        Xtrain = KappaDataset(nc_file_path, indices=train_ind)
-        Xval = KappaDataset(nc_file_path, indices=val_ind)
+        if int(seq_len) > 1:
+            Xtrain = SequenceKappaDataset(nc_file_path, indices=train_ind, seq_len=int(seq_len))
+            Xval = SequenceKappaDataset(nc_file_path, indices=val_ind, seq_len=int(seq_len))
+        else:
+            Xtrain = KappaDataset(nc_file_path, indices=train_ind)
+            Xval = KappaDataset(nc_file_path, indices=val_ind)
 
-        train_loader = DataLoader(Xtrain, batch_size=batch_size, shuffle=False)
-        val_loader = DataLoader(Xval, batch_size=batch_size, shuffle=False)
+        cuda_kwargs = {"pin_memory": device.startswith('cuda'), "num_workers": 0} if isinstance(batch_size, int) else {}
+        train_loader = DataLoader(Xtrain, batch_size=batch_size, shuffle=False, **cuda_kwargs)
+        val_loader = DataLoader(Xval, batch_size=batch_size, shuffle=False, **cuda_kwargs)
 
         # Per-fold results directory
         results_dir = os.path.join(base_results_dir, f"fold_{fold}")
@@ -118,6 +206,9 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         train_losses, val_losses = [], []
         best_val_loss = float('inf')
 
+        # AMP scaler for mixed precision (enabled only on CUDA)
+        scaler = GradScaler(enabled=(device == 'cuda'))
+
         for epoch in range(start_epoch, epochs):
             model.train()
             train_loss = 0
@@ -127,10 +218,21 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                 x_batch, y_batch = x_batch.to(device), y_batch.to(device)
 
                 optimizer.zero_grad()
-                preds = model(x_batch)
-                loss = loss_fn(preds, y_batch)
-                loss.backward()
-                optimizer.step()
+                try:
+                    with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                        preds = model(x_batch)
+                        loss = loss_fn(preds, y_batch)
+                except RuntimeError as e:
+                    if 'unable to find an engine' in str(e).lower():
+                        # Fallback to full precision for this batch
+                        preds = model(x_batch)
+                        loss = loss_fn(preds, y_batch)
+                    else:
+                        raise
+                # Backward with AMP
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 train_loss += loss.item()
                 current_loss = loss.item()
@@ -153,8 +255,16 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             with torch.no_grad():
                 for x_val, y_val in pbar_val:
                     x_val, y_val = x_val.to(device), y_val.to(device)
-                    preds = model(x_val)
-                    loss = loss_fn(preds, y_val)
+                    try:
+                        with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                            preds = model(x_val)
+                            loss = loss_fn(preds, y_val)
+                    except RuntimeError as e:
+                        if 'unable to find an engine' in str(e).lower():
+                            preds = model(x_val)
+                            loss = loss_fn(preds, y_val)
+                        else:
+                            raise
                     val_loss += loss.item()
                     pbar_val.set_postfix({"ValLoss": f"{loss.item():.4f}"})
 
