@@ -193,9 +193,23 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             Xtrain = KappaDataset(nc_file_path, indices=train_ind)
             Xval = KappaDataset(nc_file_path, indices=val_ind)
 
-        cuda_kwargs = {"pin_memory": device.startswith('cuda'), "num_workers": 0} if isinstance(batch_size, int) else {}
-        train_loader = DataLoader(Xtrain, batch_size=batch_size, shuffle=False, **cuda_kwargs)
-        val_loader = DataLoader(Xval, batch_size=batch_size, shuffle=False, **cuda_kwargs)
+        # DataLoader performance settings
+        use_cuda = str(device).startswith('cuda')
+        workers = max(1, min(8, (os.cpu_count() or 2) // 2))
+        common_kwargs = {
+            "batch_size": batch_size,
+            "shuffle": False,
+            "pin_memory": use_cuda,
+            "num_workers": workers,
+            "persistent_workers": workers > 0,
+            "drop_last": True,
+        }
+        # prefetch_factor is only valid if num_workers > 0
+        if workers > 0:
+            common_kwargs["prefetch_factor"] = 2
+
+        train_loader = DataLoader(Xtrain, **common_kwargs)
+        val_loader = DataLoader(Xval, **common_kwargs)
 
         # Per-fold results directory
         results_dir = os.path.join(base_results_dir, f"fold_{fold}")
@@ -215,7 +229,9 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             pbar = tqdm(train_loader, desc=f"Fold {fold} | Epoch {epoch+1}/{epochs} [Training]", leave=False)
 
             for batch_idx, (x_batch, y_batch) in enumerate(pbar):
-                x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+                # non_blocking copies work with pinned memory and CUDA
+                x_batch = x_batch.to(device, non_blocking=True)
+                y_batch = y_batch.to(device, non_blocking=True)
 
                 optimizer.zero_grad()
                 try:
@@ -238,8 +254,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                 current_loss = loss.item()
                 pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
 
-                # Log batch metrics
-                if batch_idx % 10 == 0:  # Log every 10 batches
+                # Log batch metrics (less frequently)
+                if batch_idx % 50 == 0:  # Log every 50 batches
                     mlflow.log_metric(f'fold{fold}/train/batch_loss', current_loss,
                                       step=epoch * len(train_loader) + batch_idx)
                     log_system_metrics(epoch * len(train_loader) + batch_idx)
@@ -274,9 +290,7 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
 
             print(f"✅ Fold {fold} Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
 
-            # Log latest and best models within the run
-            mlflow.pytorch.log_model(model, f"fold{fold}/latest_model")
-
+            # Log best model within the run
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 mlflow.pytorch.log_model(model, f"fold{fold}/best_model")

@@ -14,8 +14,14 @@ class SequenceKappaDataset(Dataset):
         y_last: [2, lev, lat, lon] (targets at the last timestep of the window)
     """
     def __init__(self, nc_path: str, indices: Optional[Sequence[int]] = None, seq_len: int = 3):
-        self.data = nc.Dataset(nc_path, 'r')
-        total_timesteps = len(self.data.dimensions['time'])
+        # Lazy open per worker
+        self.nc_path = nc_path
+        self.data = None
+        with nc.Dataset(nc_path, 'r') as tmp:
+            total_timesteps = len(tmp.dimensions['time'])
+            self.lev = tmp.dimensions['lev'].size
+            self.lat = tmp.dimensions['lat'].size
+            self.lon = tmp.dimensions['lon'].size
         self.seq_len = int(seq_len)
         assert self.seq_len >= 1
 
@@ -30,14 +36,18 @@ class SequenceKappaDataset(Dataset):
         self.inputs_4d = ['DU_lite', 'SS_lite', 'SU_lite', 'CA_lite', 'apm1', 'svo', 'sd', 'st']
         self.target_vars = ['kappa_SU', 'kappa_CA']
 
-        self.lev = self.data.dimensions['lev'].size
-        self.lat = self.data.dimensions['lat'].size
-        self.lon = self.data.dimensions['lon'].size
-
     def __len__(self):
         return len(self.indices)
 
     def _build_input_at_time(self, t: int) -> np.ndarray:
+        # Ensure dataset is open in worker
+        if self.data is None:
+            self.data = nc.Dataset(self.nc_path, 'r')
+            for v in list(self.inputs_3d) + list(self.inputs_4d) + list(self.target_vars):
+                try:
+                    self.data.variables[v].set_auto_maskandscale(False)
+                except Exception:
+                    pass
         inputs = []
         for var in self.inputs_3d:
             arr = np.nan_to_num(self.data.variables[var][t])  # [lat, lon]
@@ -63,3 +73,11 @@ class SequenceKappaDataset(Dataset):
         x_tensor = torch.tensor(x_seq, dtype=torch.float32)
         y_tensor = torch.tensor(y_last, dtype=torch.float32)
         return x_tensor, y_tensor
+
+    def __del__(self):
+        try:
+            if self.data is not None:
+                self.data.close()
+        except Exception:
+            pass
+

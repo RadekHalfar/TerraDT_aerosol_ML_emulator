@@ -35,14 +35,13 @@ if __name__ == '__main__':
     loss_fn = nn.MSELoss()
     
     # Run the training
-    train_model('hamlite_sample_data_filtered.nc', epochs=1, plot=True, model=model, 
+    train_model('hamlite_sample_data_filtered.nc', epochs=15, plot=True, model=model, 
         optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 3,
         lr = lr, batch_size = batch_size, experiment_name="KappaPredictor", 
         seq_len=3, show_fold_plot=False)
     
     #visualize_mlflow_prediction(
-    #    #run_id="0b6d8924840d4773bb0e32330acf1327",
-    #    run_id="822939c4c09a489ab3d6fb167cfb7175",
+    #    run_id="1ce939e6c3984f5c9005cf72a7512804",
     #    nc_path="hamlite_sample_data_filtered.nc",
     #    lev_indices=[0, 10],  # levels to visualize
     #    model_name="fold0/best_model"
