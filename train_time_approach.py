@@ -133,6 +133,21 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             torch.backends.cudnn.allow_tf32 = True
         except Exception:
             pass
+    # AMP configuration: prefer bfloat16 if supported (more stable), else float16
+    use_cuda = (device == 'cuda')
+    amp_dtype = None
+    scaler_enabled = False
+    if use_cuda:
+        try:
+            if torch.cuda.is_bf16_supported():
+                amp_dtype = torch.bfloat16
+                scaler_enabled = False  # no scaler needed for bf16
+            else:
+                amp_dtype = torch.float16
+                scaler_enabled = True
+        except Exception:
+            amp_dtype = torch.float16
+            scaler_enabled = True
     
     # Log parameters
     mlflow.log_params({
@@ -220,9 +235,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         train_losses, val_losses = [], []
         best_val_loss = float('inf')
 
-        # AMP scaler for mixed precision (enabled only on CUDA)
-        #scaler = GradScaler(enabled=(device == 'cuda'))
-        scaler = GradScaler(enabled=False)
+        # AMP scaler for mixed precision
+        scaler = GradScaler(enabled=scaler_enabled)
 
         for epoch in range(start_epoch, epochs):
             model.train()
@@ -236,8 +250,7 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
 
                 optimizer.zero_grad()
                 try:
-                    #with autocast(device_type='cuda', enabled=(device == 'cuda')):
-                    with autocast(device_type='cuda', enabled=False):
+                    with autocast(device_type='cuda', dtype=amp_dtype, enabled=use_cuda):
                         preds = model(x_batch)
                         loss = loss_fn(preds, y_batch)
                 except RuntimeError as e:
@@ -247,10 +260,18 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                         loss = loss_fn(preds, y_batch)
                     else:
                         raise
-                # Backward with AMP
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                # Backward + gradient clipping (works with AMP on/off)
+                if getattr(scaler, 'is_enabled', lambda: False)():
+                    scaler.scale(loss).backward()
+                    # Unscale then clip
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
 
                 train_loss += loss.item()
                 current_loss = loss.item()
@@ -274,8 +295,7 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                 for x_val, y_val in pbar_val:
                     x_val, y_val = x_val.to(device), y_val.to(device)
                     try:
-                        #with autocast(device_type='cuda', enabled=(device == 'cuda')):
-                        with autocast(device_type='cuda', enabled=False):
+                        with autocast(device_type='cuda', dtype=amp_dtype, enabled=use_cuda):
                             preds = model(x_val)
                             loss = loss_fn(preds, y_val)
                     except RuntimeError as e:

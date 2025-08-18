@@ -96,10 +96,10 @@ class KappaPredictorConvLSTM(nn.Module):
         # Optional light encoder before ConvLSTM
         self.enc = nn.Sequential(
             nn.Conv3d(in_channels, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(32),
+            nn.GroupNorm(num_groups=8, num_channels=32),
             nn.ReLU(inplace=True),
             nn.Conv3d(32, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(64),
+            nn.GroupNorm(num_groups=8, num_channels=64),
             nn.ReLU(inplace=True),
         )
         self.convlstm = ConvLSTM3D(input_channels=64,
@@ -109,7 +109,7 @@ class KappaPredictorConvLSTM(nn.Module):
         # Decoder to 2 targets
         self.dec = nn.Sequential(
             nn.Conv3d(hidden_channels, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(64),
+            nn.GroupNorm(num_groups=8, num_channels=64),
             nn.ReLU(inplace=True),
             nn.Conv3d(64, out_channels, kernel_size=1)
         )

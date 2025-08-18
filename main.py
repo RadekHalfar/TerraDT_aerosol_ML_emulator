@@ -9,7 +9,7 @@ from utils import visualize_mlflow_prediction
 
 if __name__ == '__main__':
 
-    lr = 1e-3
+    lr = 1e-4
     batch_size = 1
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -35,8 +35,8 @@ if __name__ == '__main__':
     loss_fn = nn.MSELoss()
     
     # Run the training
-    train_model('hamlite_sample_data_filtered.nc', epochs=15, plot=True, model=model, 
-        optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 3,
+    train_model('hamlite_sample_data_filtered.nc', epochs=3, plot=True, model=model, 
+        optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 2,
         lr = lr, batch_size = batch_size, experiment_name="KappaPredictor", 
         seq_len=1, show_fold_plot=False)
     
