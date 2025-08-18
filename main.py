@@ -10,7 +10,7 @@ from utils import visualize_mlflow_prediction
 if __name__ == '__main__':
 
     lr = 1e-3
-    batch_size = 4
+    batch_size = 1
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
@@ -25,7 +25,7 @@ if __name__ == '__main__':
 
     model = KappaPredictorConvLSTM(
         in_channels=12,
-        hidden_channels=64,
+        hidden_channels=32,
         num_layers=1,
         kernel_size=3,
         out_channels=2
@@ -38,7 +38,7 @@ if __name__ == '__main__':
     train_model('hamlite_sample_data_filtered.nc', epochs=15, plot=True, model=model, 
         optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 3,
         lr = lr, batch_size = batch_size, experiment_name="KappaPredictor", 
-        seq_len=3, show_fold_plot=False)
+        seq_len=1, show_fold_plot=False)
     
     #visualize_mlflow_prediction(
     #    run_id="1ce939e6c3984f5c9005cf72a7512804",

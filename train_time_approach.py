@@ -221,7 +221,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         best_val_loss = float('inf')
 
         # AMP scaler for mixed precision (enabled only on CUDA)
-        scaler = GradScaler(enabled=(device == 'cuda'))
+        #scaler = GradScaler(enabled=(device == 'cuda'))
+        scaler = GradScaler(enabled=False)
 
         for epoch in range(start_epoch, epochs):
             model.train()
@@ -235,7 +236,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
 
                 optimizer.zero_grad()
                 try:
-                    with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                    #with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                    with autocast(device_type='cuda', enabled=False):
                         preds = model(x_batch)
                         loss = loss_fn(preds, y_batch)
                 except RuntimeError as e:
@@ -272,7 +274,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
                 for x_val, y_val in pbar_val:
                     x_val, y_val = x_val.to(device), y_val.to(device)
                     try:
-                        with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                        #with autocast(device_type='cuda', enabled=(device == 'cuda')):
+                        with autocast(device_type='cuda', enabled=False):
                             preds = model(x_val)
                             loss = loss_fn(preds, y_val)
                     except RuntimeError as e:
@@ -293,7 +296,8 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             # Log best model within the run
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                mlflow.pytorch.log_model(model, f"fold{fold}/best_model")
+                #mlflow.pytorch.log_model(model, f"fold{fold}/best_model")
+                mlflow.pytorch.log_model(model, name=f"fold{fold}_best_model")
 
                 with open(log_path, "a") as f:
                     f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
