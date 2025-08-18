@@ -168,7 +168,9 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
     full_dataset.close()
 
     indices = np.arange(total_timesteps)
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
+    # Only create TimeSeriesSplit when performing k-fold CV
+    if int(n_splits) >= 2:
+        tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     #val_dataset = KappaDataset(nc_file_path, indices=val_idx)
     #test_dataset = KappaDataset(nc_file_path, indices=test_idx)
 
@@ -193,6 +195,159 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
 
     all_fold_metrics = []
     last_fold_outputs = None
+
+    # If n_splits <= 1, run a single normal training (no k-fold)
+    if int(n_splits) <= 1:
+        # Chronological split: 80% train, 20% val
+        split = int(0.8 * len(indices))
+        train_ind = indices[:split]
+        val_ind = indices[split:]
+
+        # Datasets and loaders
+        if int(seq_len) > 1:
+            Xtrain = SequenceKappaDataset(nc_file_path, indices=train_ind, seq_len=int(seq_len))
+            Xval = SequenceKappaDataset(nc_file_path, indices=val_ind, seq_len=int(seq_len))
+        else:
+            Xtrain = KappaDataset(nc_file_path, indices=train_ind)
+            Xval = KappaDataset(nc_file_path, indices=val_ind)
+
+        use_cuda = str(device).startswith('cuda')
+        workers = max(1, min(8, (os.cpu_count() or 2) // 2))
+        common_kwargs = {
+            "batch_size": batch_size,
+            "shuffle": False,
+            "pin_memory": use_cuda,
+            "num_workers": workers,
+            "persistent_workers": workers > 0,
+            "drop_last": True,
+        }
+        if workers > 0:
+            common_kwargs["prefetch_factor"] = 2
+
+        train_loader = DataLoader(Xtrain, **common_kwargs)
+        val_loader = DataLoader(Xval, **common_kwargs)
+
+        # Results directory
+        results_dir = os.path.join(base_results_dir, f"single_run")
+        os.makedirs(results_dir, exist_ok=True)
+        log_path = os.path.join(results_dir, "val_loss_log.txt")
+        training_plot_path = os.path.join(results_dir, "training_curve.png")
+
+        train_losses, val_losses = [], []
+        best_val_loss = float('inf')
+
+        # AMP scaler
+        scaler = GradScaler(enabled=scaler_enabled)
+
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            train_loss = 0
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]", leave=False)
+
+            for batch_idx, (x_batch, y_batch) in enumerate(pbar):
+                x_batch = x_batch.to(device, non_blocking=True)
+                y_batch = y_batch.to(device, non_blocking=True)
+
+                optimizer.zero_grad()
+                try:
+                    with autocast(device_type='cuda', dtype=amp_dtype, enabled=use_cuda):
+                        preds = model(x_batch)
+                        loss = loss_fn(preds, y_batch)
+                except RuntimeError as e:
+                    if 'unable to find an engine' in str(e).lower():
+                        preds = model(x_batch)
+                        loss = loss_fn(preds, y_batch)
+                    else:
+                        raise
+
+                if getattr(scaler, 'is_enabled', lambda: False)():
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+
+                train_loss += loss.item()
+                pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+
+                if batch_idx % 50 == 0:
+                    mlflow.log_metric('train/batch_loss', loss.item(),
+                                      step=epoch * len(train_loader) + batch_idx)
+                    log_system_metrics(epoch * len(train_loader) + batch_idx)
+
+            train_loss /= max(1, len(train_loader))
+            train_losses.append(train_loss)
+            mlflow.log_metric('train/epoch_loss', train_loss, step=epoch)
+
+            # Validation
+            model.eval()
+            val_loss = 0
+            pbar_val = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Validation]", leave=False)
+            with torch.no_grad():
+                for x_val, y_val in pbar_val:
+                    x_val, y_val = x_val.to(device), y_val.to(device)
+                    try:
+                        with autocast(device_type='cuda', dtype=amp_dtype, enabled=use_cuda):
+                            preds = model(x_val)
+                            loss = loss_fn(preds, y_val)
+                    except RuntimeError as e:
+                        if 'unable to find an engine' in str(e).lower():
+                            preds = model(x_val)
+                            loss = loss_fn(preds, y_val)
+                        else:
+                            raise
+                    val_loss += loss.item()
+                    pbar_val.set_postfix({"ValLoss": f"{loss.item():.4f}"})
+
+            val_loss /= max(1, len(val_loader))
+            val_losses.append(val_loss)
+            mlflow.log_metric('val/epoch_loss', val_loss, step=epoch)
+
+            print(f"✅ Epoch {epoch+1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                mlflow.pytorch.log_model(model, name="best_model")
+                with open(log_path, "a") as f:
+                    f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
+            else:
+                with open(log_path, "a") as f:
+                    f.write(f"Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
+
+        # Plot
+        if plot:
+            fig, ax1 = plt.subplots(figsize=(8, 5))
+            ax1.plot(train_losses, color='blue', label='Train Loss')
+            ax1.set_xlabel("Epoch")
+            ax1.set_ylabel("Train Loss (MSE)", color='blue')
+            ax1.tick_params(axis='y', labelcolor='blue')
+            ax1.grid(True)
+            ax2 = ax1.twinx()
+            ax2.plot(val_losses, color='red', label='Validation Loss')
+            ax2.set_ylabel("Validation Loss (MSE)", color='red')
+            ax2.tick_params(axis='y', labelcolor='red')
+            fig.tight_layout()
+            plt.title("Training and Validation Loss")
+            plt.savefig(training_plot_path)
+            mlflow.log_artifact(training_plot_path)
+            if show_fold_plot:
+                plt.show()
+            else:
+                plt.close(fig)
+
+        # Log final metrics and code
+        mlflow.log_metrics({
+            'best_val_loss': best_val_loss,
+            'final_train_loss': train_losses[-1] if train_losses else None,
+            'final_val_loss': val_losses[-1] if val_losses else None,
+        })
+        mlflow.log_artifact(__file__)
+        mlflow.end_run()
+        return model, train_losses, val_losses
 
     # Iterate chronological folds
     for fold, (train_ind, val_ind) in enumerate(tscv.split(indices)):
