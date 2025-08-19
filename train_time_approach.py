@@ -19,6 +19,7 @@ from copy import deepcopy
 from SequenceKappaDataset import SequenceKappaDataset
 from torch.amp import autocast, GradScaler
 import platform
+from mlflow.models.signature import infer_signature
 
 def log_system_metrics(step):
     """Log system metrics"""
@@ -234,6 +235,9 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         training_plot_path = os.path.join(results_dir, "training_curve.png")
 
         train_losses, val_losses = [], []
+        # Cache for MLflow model logging
+        signature_cached = None
+        input_example_np = None
         best_val_loss = float('inf')
 
         # AMP scaler
@@ -311,7 +315,25 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                mlflow.pytorch.log_model(model, name="best_model")
+                # Prepare signature and input example once
+                if signature_cached is None or input_example_np is None:
+                    try:
+                        example_batch = next(iter(val_loader))[0][:1]  # shape depends on seq_len
+                        example_on_device = example_batch.to(device)
+                        with torch.no_grad():
+                            example_out = model(example_on_device)
+                        input_example_np = example_on_device.detach().cpu().numpy()
+                        output_example_np = example_out.detach().cpu().numpy()
+                        signature_cached = infer_signature(input_example_np, output_example_np)
+                    except Exception:
+                        signature_cached = None
+                        input_example_np = None
+                if signature_cached is not None and input_example_np is not None:
+                    mlflow.pytorch.log_model(
+                        model, name="best_model", input_example=input_example_np, signature=signature_cached
+                    )
+                else:
+                    mlflow.pytorch.log_model(model, name="best_model")
                 with open(log_path, "a") as f:
                     f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
             else:
@@ -471,8 +493,26 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
             # Log best model within the run
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                # Prepare signature and input example once
+                if signature_cached is None or input_example_np is None:
+                    try:
+                        example_batch = next(iter(val_loader))[0][:1]
+                        example_on_device = example_batch.to(device)
+                        with torch.no_grad():
+                            example_out = model(example_on_device)
+                        input_example_np = example_on_device.detach().cpu().numpy()
+                        output_example_np = example_out.detach().cpu().numpy()
+                        signature_cached = infer_signature(input_example_np, output_example_np)
+                    except Exception:
+                        signature_cached = None
+                        input_example_np = None
                 #mlflow.pytorch.log_model(model, f"fold{fold}/best_model")
-                mlflow.pytorch.log_model(model, name=f"fold{fold}_best_model")
+                if signature_cached is not None and input_example_np is not None:
+                    mlflow.pytorch.log_model(
+                        model, name=f"fold{fold}_best_model", input_example=input_example_np, signature=signature_cached
+                    )
+                else:
+                    mlflow.pytorch.log_model(model, name=f"fold{fold}_best_model")
 
                 with open(log_path, "a") as f:
                     f.write(f"[BEST] Epoch {epoch+1}: Val Loss = {val_loss:.6f}, Train Loss = {train_loss:.6f}\n")
