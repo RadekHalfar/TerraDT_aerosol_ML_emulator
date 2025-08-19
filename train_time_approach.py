@@ -159,6 +159,74 @@ def train_model(nc_file_path, resume_from=None, epochs=50, batch_size=4, lr=1e-3
         'model_type': model.__class__.__name__,
         'seq_len': int(seq_len),
     })
+
+    # Log additional model/training flags
+    try:
+        extra_params = {}
+        # Model architecture flags (UNet3DTemporal or others if present)
+        base_ch_val = getattr(model, 'base_ch', None)
+        depth_val = getattr(model, 'depth', None) or getattr(getattr(model, 'core', None), 'depth', None)
+        temporal_mode_val = getattr(model, 'temporal_mode', None)
+        # attn heads if temporal attention exists
+        attn_heads_val = None
+        if getattr(model, 'temporal_attn', None) is not None:
+            attn_heads_val = getattr(getattr(model.temporal_attn, 'attn', None), 'num_heads', None)
+        # residual/SE from first encoder block if available
+        use_residual_val = getattr(getattr(getattr(model, 'core', None), 'enc0', None), 'use_residual', None)
+        use_se_val = getattr(getattr(getattr(model, 'core', None), 'enc0', None), 'use_se', None)
+        fuse_multiscale_val = getattr(model, 'fuse_multiscale', None)
+
+        def _set(k, v):
+            if v is not None:
+                extra_params[k] = v
+
+        _set('unet/base_ch', base_ch_val)
+        _set('unet/depth', depth_val)
+        _set('unet/temporal_mode', temporal_mode_val)
+        _set('unet/attn_heads', attn_heads_val)
+        _set('unet/use_residual', use_residual_val)
+        _set('unet/use_se', use_se_val)
+        _set('unet/fuse_multiscale', fuse_multiscale_val)
+
+        # ConvLSTM baseline flags (if applicable)
+        if model.__class__.__name__ == 'KappaPredictorConvLSTM':
+            try:
+                convlstm = getattr(model, 'convlstm', None)
+                num_layers_cl = getattr(convlstm, 'num_layers', None) if convlstm is not None else None
+                # hidden_channels from first cell
+                hidden_ch_cl = None
+                ksize_cl = None
+                if convlstm is not None and len(getattr(convlstm, 'layers', [])) > 0:
+                    cell0 = convlstm.layers[0]
+                    hidden_ch_cl = getattr(cell0, 'hidden_channels', None)
+                    # kernel_size from Conv3d layer
+                    k = getattr(getattr(cell0, 'gates', None), 'kernel_size', None)
+                    if isinstance(k, tuple) and len(k) > 0:
+                        ksize_cl = k[0]
+                _set('convlstm/num_layers', num_layers_cl)
+                _set('convlstm/hidden_channels', hidden_ch_cl)
+                _set('convlstm/kernel_size', ksize_cl)
+            except Exception:
+                pass
+
+        # Training configuration
+        opt_name = optimizer.__class__.__name__ if optimizer is not None else None
+        weight_decay_val = None
+        try:
+            if optimizer is not None and len(optimizer.param_groups) > 0:
+                weight_decay_val = optimizer.param_groups[0].get('weight_decay', None)
+        except Exception:
+            pass
+        loss_name = loss_fn.__class__.__name__ if loss_fn is not None else None
+
+        _set('train/optimizer', opt_name)
+        _set('train/weight_decay', weight_decay_val)
+        _set('train/loss_fn', loss_name)
+
+        if len(extra_params) > 0:
+            mlflow.log_params(extra_params)
+    except Exception:
+        pass
     
     # Log model architecture
     mlflow.log_text(str(model), 'model_architecture.txt')
