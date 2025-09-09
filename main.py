@@ -50,7 +50,7 @@ if __name__ == '__main__':
     loss_fn = nn.MSELoss()
     
     # Run the training
-    train_model('hamlite_sample_data_filtered.nc', epochs=50, plot=True, model=model, 
+    train_model('hamlite_sample_data_filtered.nc', epochs=1, plot=True, model=model, 
         optimizer=optimizer, loss_fn=loss_fn, device = device, n_splits = 1,
         lr = lr, batch_size = batch_size, experiment_name="KappaPredictor", 
         seq_len=3, show_fold_plot=False)

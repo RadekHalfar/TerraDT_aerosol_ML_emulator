@@ -89,9 +89,15 @@ class SequenceKappaDataset(Dataset):
         except Exception:
             pass
 
-    def _compute_input_stats(self, max_samples: int = 256):
+    def _compute_input_stats(self, max_samples: int = 256, log_normal: bool = True):
         """
-        Compute per-channel mean and std for the 12 input channels using up to max_samples timesteps.
+        Compute per-channel statistics for the input channels using up to max_samples timesteps.
+        
+        Args:
+            max_samples: Maximum number of timesteps to use for statistics computation
+            log_normal: If True, compute statistics in log space (for log-normal distribution).
+                       If False, compute normal distribution statistics.
+                       Default is True (log-normal).
         """
         try:
             # Construct base indices able to form full windows
@@ -128,15 +134,34 @@ class SequenceKappaDataset(Dataset):
                         inputs.append(arr)
                     x = np.stack(inputs, axis=0)
                     x_reshaped = x.reshape(C, -1)
-                    sum_c += x_reshaped.sum(axis=1)
-                    sumsq_c += (x_reshaped ** 2).sum(axis=1)
+                    
+                    if log_normal:
+                        # For log-normal, we take log of data first (add small value to avoid log(0))
+                        x_log = np.log(x_reshaped + 1e-12)
+                        sum_c += x_log.sum(axis=1)
+                        sumsq_c += (x_log ** 2).sum(axis=1)
+                    else:
+                        # Original normal distribution calculation
+                        sum_c += x_reshaped.sum(axis=1)
+                        sumsq_c += (x_reshaped ** 2).sum(axis=1)
+                        
                     count += x_reshaped.shape[1]
 
                 mean = sum_c / max(1, count)
                 var = (sumsq_c / max(1, count)) - (mean ** 2)
                 var = np.maximum(var, 1e-12)
                 std = np.sqrt(var)
-                return mean.astype(np.float32), std.astype(np.float32)
+                
+                if log_normal:
+                    # Convert log-space mean and std back to original space
+                    # For log-normal distribution:
+                    # mu = exp(mean_log + std_log²/2)
+                    # sigma² = (exp(std_log²) - 1) * exp(2*mean_log + std_log²)
+                    mu = np.exp(mean + 0.5 * var)
+                    sigma = np.sqrt((np.exp(var) - 1.0) * np.exp(2 * mean + var))
+                    return mu.astype(np.float32), sigma.astype(np.float32)
+                else:
+                    return mean.astype(np.float32), std.astype(np.float32)
         except Exception:
             return None, None
 
